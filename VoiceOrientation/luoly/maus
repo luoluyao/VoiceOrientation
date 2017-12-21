@@ -1,0 +1,871 @@
+#!/bin/tcsh 
+
+
+# MAUS segmentation for one file only using the MAUS webservice
+
+# This wrapper maus.web simulates the behaviour of the original maus script
+# but uses the MAUS webservice instead of the locally installed MAUS
+# package. That way you can use maus (and scripts calling maus) as 
+# if the MAUS package is installed on your local PC. All you need is 
+# a valid internet connection, install this script on your local PC 
+# (you'll need a UNIX terminal/konsole for that), rename it from 
+# 'maus.web' to 'maus' (mv maus.web maus) and make it executable
+# (chmod 755 maus). Then you can call it like the original maus script
+# or call other wrapper scripts from the maus package that use the 'maus' 
+# script (e.g. maus.corpus, maus.iter, maus.trn).
+
+# Needed helper on local machine: xpath (test with 'which xpath')
+
+# Author F. Schiel (schiel@bas.uni-muenchen.de)
+
+set VERSION =  1.21
+
+# The option 'SERVICE=<service-url>' can be used to over-write the default
+# address of the web-service:
+set SERVICE = "http://clarin.phonetik.uni-muenchen.de/BASWebServicesTest/services"
+
+# To get a help message, simply type in 'maus.web'
+# To get the version number type in 'maus.web --version'
+
+##########################################################################
+
+set MMF = ""
+set PARAM = ""
+set RULESET = ""
+set MINPAUSLEN = 5    # setting to 1 causes no pauses to be deleted,
+                      # 2 : pauses of 1 frame are deleted, ...
+		      # 40msec seems to be the value that will not yet
+		      # be perceived as a pause...
+		      # note that only optional pauses '#', '&' and '<p:>'
+		      # will be deleted here; '<' and '>' will always stay.
+set SIGNAL = ""
+set BPF = ""
+set OUT = ""
+set OUTFORMAT = "mau" # if set to 'mau|csv' a BPF mau tier is created
+                      # if set to 'TextGrid' a praat TextGrid is created in OUT
+                      # if set to 'emu' a Emu *.hlb and *.phonetic is created
+                      # if set to 'legacyEMU' a file *.EMU is created which contains the *.hlb
+		      #  and *.phonetic Emu files separated by a line '-------cut here------'
+		      # if set to 'par' the mau tier is added to the BPF 
+		      #   input file and the result is created
+set INSORTTEXTGRID = "no" 
+                      # if set to "yes" an additional word tier is inserted 
+set INSKANTEXTGRID = "no" 
+                      # if set to "yes" an additional canonical transcript tier is inserted 
+set USETRN = "no"     # if set to "yes" a presegmentation of the whole
+                      # utterance will be read from the first TRN tier entry of the 
+		      # input BPF and the search is constrained to the 
+		      # segment given in that TRN tier.
+		      # if no BPF is given on the command line this option is ignored
+
+set v = 1
+set TRACE = 0
+set KANSTR = ""
+set LANGUAGE = "deu"     # overrides option PARAM; simple mapping if iso639 codes to PARAM files
+#set CANONLY = no      # set to 'yes' causes maus just to align the string 
+#                      # of symbols without the MAUS technique
+set MODUS = "standard"   # if set to 'align' MAUS switches to forced alignment
+set WEIGHT = "default"       # this option weights the influence of the statistical
+                      # MAUS model against the acoustical scores. More
+		      # precisely WEIGHT is multiplied to the MAUS model
+		      # score (log likelihood) before adding the score to 
+		      # the acoustical score in the search. Since this option 
+		      # has language-dependent default values (which are defined in the
+		      # parameter set of the language in file 'DEFAULTS', the variable
+		      # is set to the empty string here. Setting the option will overwrite
+		      # the default.
+set INSPROB = 0.0     # Insertion probability of segments (see above)		      
+set STARTWORD = 0
+set ENDWORD = 999999
+set MAUSSHIFT = default   # constant shift of MAUS boundaries in msecs
+set PRINTINV = no    # if set to yes, maus copies the set of allowed SAM-PA
+                     # symbols in the input for the chosen language to the 
+		     # output file OUT or to SAMPA.tab, if OUT not given
+set allowresamp = "true" # set to 'yes' will cause maus to resample signals
+                      # with the wrong sampling rate using sox
+set OUTSYMBOL = "sampa"
+set INFORMAT = "bpf"
+
+
+if ( $1 == '--version' ) then 
+  echo $VERSION
+  exit 1
+endif
+
+# Actually do the argument parsing here
+
+#echo parsing commandline
+#echo "$0 $*"
+while ( "$1" != "" )
+	switch ("$1")
+	case *=*:
+		set key = `echo $1 | awk -F= '{ print $1 }'`
+		#check if option is known (set)
+		eval set checkoption = '$?'$key
+                if ( $checkoption == 0 ) then 
+		  echo "ERROR: unknown option $key - exiting"
+		  exit 1
+		endif  
+		set val = `echo $1 | awk -F= '{ print $2 }'`
+		eval "set $key "= \'"$val"\'
+		unset key val
+		shift
+		breaksw
+        default:
+		break
+        endsw
+end
+
+# end option parser
+
+# check for xpath
+which xpath >& /dev/null
+if ( $status != 0 ) then 
+  echo "ERROR: 'xpath' not installed on local system - exiting"
+  exit 1
+endif
+
+# boolen variable check; define all boolean input parameters here
+# incontrast to the maus script the MAUS webservice accepts boolean only
+# as 'true|fals'; therefore we set all booleans here anew
+
+set bool = ( PRINTINV allowresamp USETRN INSORTTEXTGRID INSKANTEXTGRID )
+foreach booleanvariable ( $bool )
+  eval set val = '$'$booleanvariable
+  switch ( $val ) 
+  case true:
+    eval set $booleanvariable = true
+    breaksw
+  case True:
+    eval set $booleanvariable = true
+    breaksw
+  case TRUE:
+    eval set $booleanvariable = true
+    breaksw
+  case 1:
+    eval set $booleanvariable = true
+    breaksw
+  case yes:
+    eval set $booleanvariable = true
+    breaksw
+  case Yes:
+    eval set $booleanvariable = true
+    breaksw
+  case YES:
+    eval set $booleanvariable = true
+    breaksw
+  case false:
+    eval set $booleanvariable = false
+    breaksw
+  case False:
+    eval set $booleanvariable = false
+    breaksw
+  case FALSE:
+    eval set $booleanvariable = false
+    breaksw
+  case 0:
+    eval set $booleanvariable = false
+    breaksw
+  case no:
+    eval set $booleanvariable = false
+    breaksw
+  case No:
+    eval set $booleanvariable = false
+    breaksw
+  case NO:
+    eval set $booleanvariable = false
+    breaksw
+  case force:
+    eval set $booleanvariable = force
+    breaksw
+  default:
+    echo "Boolean $booleanvariable=$val is not a boolean value. Use either '0,1,true,false,yes,no,(force)'"
+    exit 1
+  endsw    
+end
+
+if ( "$1" == "--version" || "$1" == "-version" ) then 
+  echo $VERSION
+  exit 0
+endif  
+
+if ( "$PRINTINV" == "FALSE" && ( "$SIGNAL" == "" || ( "$BPF" == "" && "$KANSTR" == "" && $MODUS != "bigram" ) ) ) then
+  echo "$0 version $VERSION"
+  cat <<ENDE
+
+# The following is the help page of the original maus script. Please note 
+# that some options do not work in the webservice (e.g. PARAM, MMF, RULSET)
+
+# usage: maus SIGNAL=signal.nis|wav BPF=signal.par [OUT=maustier.mau][OUTFORMAT=csv|par|TextGrid|emu|legacyEMU][CLEAN=1][PARAM=parameter-dir][LANGUAGE=iso639][MODUS=standard][allowresamp=yes][WEIGHT=weight][INSPROB=insprob][MINPAUSLEN=5][STARTWORD=0][ENDWORD=999999][MAUSSHIFT=10][INSORTTEXTGRID=no][INSKANTEXTGRID=no][USETRN=no][RULESET=rml-0.95.rul]
+# usage: maus SIGNAL=signal.nis|wav KANSTR="a: b e: # t s e:" [OUT=maustier.mau][OUTFORMAT=csv|par|TextGrid|emu|legacyEMU][CLEAN=1][PARAM=parameter-dir][LANGUAGE=iso639][MODUS=standard][allowresamp=yes][WEIGHT=weight][INSPROB=insprob][MINPAUSLEN=5][MAUSSHIFT=10][INSORTTEXTGRID=no][INSKANTEXTGRID=no][USETRN=no][RULESET=rml-0.95.rul]
+# usage: maus --version
+
+
+# General remarks:
+# The script reads a string of phonemic symbols as defined in the param
+# file KANINVENTAR, reads a signal from the file signal.nis and 
+# performs a MAUS segmentation according to these inputs.
+# The resulting segmentation is either written into a BPF MAU tier file *.mau
+# or into a Praat compatible *.TextGrid file or in Emu files or appended to the BPF
+# input file..
+# Phonemc symbols are read either from commandline or from a KAN tier of 
+# a BPF file or produced using 'create_kan' from the ORT tier of a BPF file.
+
+# Maus is also implemented as a webservice. If you are using maus as a web service,
+# not all options are available as for the plain script. Some options have different 
+# names and values to standardize certain concepts. Please look for remarks headed
+# by 'WebService:' for such special options in the following.
+
+# There are a number of general constraints on how to use maus:
+
+# With the default set of parameter files PARAM (LANGUAGE='' or LANGUAGE='deu') 
+# only German language may be
+# segmented. Furthermore the statistical rule set used here is optimized 
+# to non-prompted dialogue speech used in a formal situation. However,
+# we found that this set also works reasonable well for read speech.
+
+# To adapt this script to another language, several parameter files and 
+# programs in PARAM must be adapted: The set of phonemic symbols used in the input,
+# the MAUS internal symbol set, the mapping function between them, the 
+# Hidden Markov Models used for the search, the mapping from MAUS internal
+# symbols to HMM and of course the rule set.
+# See file USAGE for further details.
+
+# The string of phonemic input symbols must not contain any other symbol as
+# defined in KANINVENTAR. You may alter KANINVENTAR, but then you also have to 
+# re-programm the mapping routines PARAM/kan2mlf.awk and PARAM/rec2mau.awk
+# that maps these symbols to and from the 
+# MAUS internal symbol set (which cannot be altered easily).
+# The symbol '#' may be used between words indicating possible pauses
+# between the words. This is highly recommended.
+# When reading from a BPF file (option BPF) these optional pauses are
+# inserted automatically.
+
+# WebService: you may download the content of KANINVENTAR (i.e. the allowed 
+# phonetic symbols in the maus input) for the selected language by pressing
+# the button 'Inventar' next to the LANGUAGE option in the web form or by 
+# directly issuing the following curl command:
+# curl -X POST -H 'content-type: application/x-www-form-urlencoded' 'http://webap.phonetik.uni-muenchen.de:8080/BASWebServices/services/runMAUSGetInventar?LANGUAGE=iso639code'
+
+
+# This script is intended to work for mono NIST and WAV sound files with 
+# 16 kHz sampling rate and 16 bit linear (FIXRATE), because the HMM are 
+# trained to this type of data. Multi-channel files are not supported.
+# Maus will automatically resample the signal using sox (without dither!)
+# if you set the option 'allowresamp' to 'yes' (default is 'yes'; the times 
+# given in samples in the mau output are based on the original
+# sampling rate of the signal; the times given in the TextGrid output 
+# files are NOT affected by any re-sampling!) and also
+# recognize ALAW coded / 8kHz telephone speech input by the extensions
+# '.al', '.AL', '.dea' and '.DEA' and converts it into PCM / 16kHz using
+# sox. Note that telephone speech is band limited and influenced by a 
+# number of varying transfer functions and therefore not suited to be 
+# recognized by HMM that are trained on more or less clean lab speech.
+# But you can try...
+
+# You may also either re-sample using sox beforehand or
+# adjust the parameters in PRECONFIG and replace the HMM by HMM trained with 
+# data of the respective sampling rate.
+# The script will complain if you try to use other sampling rates or HMM
+# trained with other sampling rates. Note that ALL kinds of re-sampling
+# detoriate the signals!
+
+# If you use WAV/ALAW signal files as input, the tool sox must be installed 
+# on your computer.
+
+# word_var-2.0 is a C++ based program compiled for Linux that computes the
+# statistically weighted pronuciation model. If you are intending
+# to use MAUS for a different language than German AND not do not intend to 
+# use pronunciation rule sets (MODUS=align), i.e. make a simple alignment 
+# to phonemic SAM-PA transcript, then you can use maus WITHOUT installing
+# the binary word_var-2.0. The script will not call word_var-2.0, if you 
+# set the option MODUS=align. This might help on platforms where the compilation
+# of word_var-2.0 does not work or where no C++ compiler is available.
+
+# Warning: the script will write intermediary files into 
+# the cache TEMP. To be sure that these are deleted after finishing use
+# the option TEMP=/mytemp and the option CLEAN=1.
+# You may set CLEAN=0 for debugging purposes
+
+# The silence model '#' in the HMM set must be a tee-model.
+# The HVite will always complain about the 'words' '#' or '&' that are 
+# tee-words. It's safe to ignore these warning.
+
+# History: See file HISTORY in this dir
+
+# Options:
+
+# Option v=1 or higher causes maus to produce more and more information 
+# at stdout. In general v=1 is good value to start (default: v=0).
+
+# If option BPF is given, maus will try to read the canonical pronunciation
+# from a BAS Partitur Format (BPF) file. Optional pauses will be inserted
+# between words automatically. Note that the SAMPA symbols have to match the
+# set of symbols in PARAM/KANINVENTAR. Also note that the KAN tier should 
+# not contain symbols for silence intervals ('#', '&' or '<p:>'); these
+# should only be used with the KANSTR option (see below). If your BPF input
+# files contain such 'silence words' (= words that consist only of a silence
+# symbol) use the '<nib>' (non spoken interval) symbol instead.
+# If the BPF file does not contain a KAN tier, maus will look for an ORT 
+# tier and add a KAN tier to the temporary BPF file (input BPF unchanged!) 
+# using the script CREATEKAN (which is not a part of the maus package!)
+
+# If option KANSTR is given, maus will use the string of phonemic symbols
+# given from command line. Each symbol is separated by the next by a 
+# single blank. Note that these symbols have to match the 
+# set of symbols in PARAM/KANINVENTAR. Other than in BPF input the special
+# characters '"#+ are not allowed here. Also note that no optional pauses
+# will be inserted between words. You have to do that explicitely by 
+# inserting the symbol '#' or '<p:>'. If you want to force MAUS to model
+# a silence interval at a certain point, insert the symbol '<'.
+# Do not use the symbol '#' as the first or last symbol in KANSTR!
+# If option KANSTR is used the option INSORTTEXTGRID and INSKANTEXTGRID will
+# have no effect.
+
+# WebService: KANSTR is not supported by the MAUS Webservices. Use the KAN
+# tier in the input BPF files instead.
+
+# If the option OUT for the output is not given, maus will create an BPF
+# output file named with the body of the signal file and 
+# extension 'mau', 'par' or 'TextGrid' in the same 
+# location as the signal file (provided the user is allowed to write there).
+# Setting OUT=file will write the results into 'file' regardless the 
+# setting of OUTFORMAT, except if option OUTFORMAT=emu|legacyEMU, the resulting two Emu
+# files (*.hlb, *.phonetic) or *.EMU will be written to the path of OUT, but named
+# as the signal file.
+# The output *.csv is not a valid BPF file because it does not contain a 
+# header. But it can be appended to the corresponding input BPF file and should match
+# the other tiers exactly. To create a valid BPF containing the MAU tier
+# use OUTFORMAT=par (works only with BPF input!).
+
+# If the option OUTFORMAT is set to TextGrid, maus will produce a praat TextGrid
+# file instead of the MAU tier file (if the input contains LaTeX-Umlauts in the 
+# ORT tier they are converted to UTF-8, since praat cannot handle LaTeX label names). 
+# Since TextGrid files contain explicit times, the sampling rate problem is 
+# irrelevant in this case. See also options INSORTTEXTGRID, INSKANTEXTGRID.
+# Options START/ENDWORD do not work with TextGrid output.
+# If set to emu, maus will create Emu compatible hierarchy and segmentation
+# files, *.hlb and *.phonetic in the path of OUT and named as the input signal
+# file (if OUT not given in the location of the signal file). This works only
+# if input is read from a BPF file (option BPF=) and the input file contains
+# an ORT tier and an KAN tier. (If the input BPF file does not contain an KAN tier 
+# and the language set is 'deu', a temporary KAN tier will be created and added 
+# using CREATEKAN, which is NOT part of the MAUS distribution.)
+# The resulting Emu hierarchy consists of 3 levels (utterance,word,phonetic)
+# and two additional labels (utterance -> source, word -> cano) and only
+# one type of label file (*.phonetic) for level phonetic.
+# WARNING: for the creation of emu output maus will add a MAU tier to the 
+# input BPF, if the input BPF is in the same location as the signal file (SIGNAL=).
+# A already existing MAU tier is overwritten without warning; if you want to
+# prevent this, place the input BPF in a different directory than the signal file.
+# WARNING: Emu does not tolerate some SAM-PA labels such as curly brackets ({}).
+# If you are using a language containing such symbols, you must replace these
+# labels by Emu-comform symbols before using the maus-created Emu files.
+# If the option OUTFORMAT is set to legacyEMU, maus will do the same as emu, but store
+# both Emu files into a single file *.EMU separated by a line '-----cut here------'.
+# Options START/ENDWORD do not work with Emu output.
+# If the option OUTFORMAT is set to par, the MAU tier is added to the 
+# BPF input file (an existing MAU is being replaced) and the result is returned.
+# This works only with BPF input, not with KANSTR input.
+
+# If the option CLEAN=1 is given (default), the script will erases all cached 
+# slf, rec, htk and mlf files from TEMP at the end of the script. This 
+# is highly recommended unless you know exactly what you are doing and need
+# to safe computing time.
+
+# The option LANGUAGE=iso639 can be used to set the language.
+# Currently supported are:
+# deu,eng,aus,nld,spa,ita,por,hun,ekk and the special 'sampa' to denote 
+# the language independent MAUS mode (all SAM-PA symbols are allowed in the 
+# input BPF KAN tier but they must be blank separated, e.g. instead of 
+# 'hOYt@' -> 'h OY t @'). SAMPA symbol 'P' and symbols with trailing back slash are 
+# not supported, e.g. 'r\'.
+
+# The option MODUS=align causes maus to skip the creation of the statistical
+# pronunciation graph and simply align the given string of phonemic symbols.
+# This maybe be for instance useful to align a manually created transcript or
+# to avoid erroneous variations in noisy or out-of-domain speech or when using
+# maus on a language where no pronunciation rule set is avaliable.
+# The script maus will not call the binary word_var-2.0 when MODUS=align;
+# this might help on platforms where the C++ program does not compile.
+
+
+# The option WEIGHT weights the influence of the statistical
+# MAUS model against the acoustical scores. More
+# precisely WEIGHT is multiplied to the MAUS model
+# score (log likelihood) before adding the score to 
+# the acoustical score within the search.
+# In an evaluation on parts of the German Verbmobil data set (27425 segments)
+# which were segmented and labelled manually (MAUS DEV set) this
+# heuristical parameter was optimized to 7.0 (which is rather similar to
+# the optimal value used in ASR which is 6.5). 
+# WEIGHT was also tested against the MAUS TEST set to confirm the value of
+# 7.0. The symmetric inter-labeller agreement for 7.0 was 79.47, for 8.0
+# 79.31, for 6.0 79.51 and for 5.0 79.47 and dropping.
+# The differences between these
+# three values are not significant; therefore we can say that the value of
+# 7.0 holds for other data sets.
+# Note that this might NOT be the optimal value for other MAUS tasks.
+# Default is 1.0
+
+# The option INSPROB influences the probability of deletion of segments.
+# It is a constant factor (a constant value added to the log likelihood score)
+# after each segment. Therefore, a higher value of INSPROB will cause
+# the probability of segmentations with more segments go up, thus decreasing
+# the probability of deletions (and increasing the probability of insertions,
+# which are rarely modelled in the rule set). This parameter has been
+# evaluated on parts of the German Verbmobil data set (27425 segments)
+# which were segmented and labelled manually (MAUS DEV set) and found to have
+# its optimum at 0.0 (which is nice). Therefore we set the default value
+# of INSPROB to 0.0
+# INSPROB was also tested against the MAUS TEST set to confirm the value of
+# 0.0. It had an optimum at 0.0 as well.
+# Note that this might NOT be the optimal value for other MAUS tasks.
+
+# The option 'allowresamp=yes' will cause maus to automatically resample
+# input signal files to 16kHz sampling rate using sox (polyphase).
+# For this to work, sox must be installed on your system. Note that all kind 
+# of re-sampling might detoriate your signal.
+
+# WebService: in the webservice 'allowresamp=yes' is always set.
+
+# The option MINPAUSLEN controls the behaviour of optional inter-word silence.
+# Inter-word silence is modelled by the symbols '#', '&' (only for 
+# compatibility) and '<p:>' (which may denote a word-internal silence
+# interval), not by '<' and '>' which model explicit silence intervals.
+# If set to 1, maus will detect all inter-word silence intervals that can be
+# found (minimum length for a silence interval is then 10 msec = 1 frame). 
+# If set to values > 1, 
+# the minimum length for an inter-word silence interval to be detected 
+# is set to n*10 msec. For example MINPAUSLEN=5 will cause MAUS to 
+# suppress inter-word silence intervals up to a length of 40msec.
+# Since 40 msec seems to be the border of perceivable silence, we set 
+# this option default to 5.
+# With other words: inter-word silences smaller than 50msec are not segmented 
+# but rather distributed equally to the adjacent segments.
+# If one of the adjacent segments happens to be a plosive (set of plosives
+# defined in rec2mau.awk) then the deleted silence interval is added totally
+# to the plosive; if both adjacent segments are plosives, the interval is
+# equally spread as with non-plosive adjacent segments.
+# (Here we assume that the frame length is always 10msec!)
+# If you want to force MAUS to insert am silence interval at a certain point
+# use the symbol '<'.
+
+# The options STARTWORD and ENDWORD control which words from the input
+# BPF file are selected for the canonical input (only for csv format output). 
+# Default STARTWORD is 0, ENDWORD is 999999 (all words). 
+# These options are useful, if the BPF file
+# contains not only one utterance but a whole dialogue, whereas the 
+# input sound file contains only a part of it (e.g. from a chunk segmentation).
+# The timing information in the resulting segmentation is of course in 
+# relation to the input signal file.
+# Note that the word numbering is passed through to the BPF output (mau),
+# if selected. Therefore *.csv files (OUTFORMAT=csv) or *.par files
+# (OUTFORMAT=par) are still conform to the source BPF file.
+# These options have no effect if the option BPF is not used; if the 
+# option OUTFORMAT is set to emu/legacyEMU, the script terminates with an error;
+# if set to TextGrid, options INSORTTEXTGRID/INSKANTEXTGRID are disabled.
+# In combination with option USETRN and a TRN entry in the input BPF, these
+# options may be used to perform partial segmentations in larger recordings.
+# See the script maus.trn in the maus distribution package for an example.
+
+# Option MAUSSHIFT causes the calculated MAUS segment boundaries to be 
+# shift by MAUSSHIFT msec. (default : 10)
+# As reported by different sources, segmentations produced by a HMM model
+# show s consistant shift in the segment boundaries of about 8-12msec too early 
+# (Probably to the begin of the analysing window; here: window length is 20msec
+# therefore the start of the window is 10msec earlier than the frame position
+# in the middle of the window.) 
+# There is no conclusive explanation for that.
+
+# Option INSORTTEXTGRID
+# If set to 'yes' and option OUTFORMAT is set to 'TextGrid' and input
+# is read from a BPF, maus will try to identify either an ORT tier
+# or - if that fails - a KAN tier (must be there as input!) and
+# write an additional interval section into the TextGrid file
+# containing the word segmentation based on the underlying MAUS
+# segmentation. The tier is called either 'ORT' or 'KAN'
+# respectively; it contains non-labeled segments where MAUS labelled
+# a silence interval and a segment either labelled with the
+# orthography or the canonical transcript for the words. If set to
+# 'no' the regular Textgrid output with one interval section is
+# produced.
+
+# Option INSKANTEXTGRID
+# Same as INSORTTEXTGRID with the KAN tier. If INSORTTEXTGRID is set as well
+# both tiers are exported after another before the phonemic tier. If the 
+# source BPF does not contain an ORT tier, only one KAN tier is being exported
+# Both options INSORTTEXTGRID and INSKANTEXTGRID will have no effect if the 
+# canonic transcript is read from the option KANSTR instead from a BPF file
+# (option BPF).
+
+# Option USETRN
+# If set to 'yes' maus will search the input BPF for a TRN tier
+# that segments the utterance within the recording. If the input
+# BPF contains no TRN tier, a warning is issued and processing resumes
+# as usual. If only one TRN entry is found, maus will cut
+# out the segment defined and run the MAUS segmentation only within the
+# cut out segment. Afterwards the offset and final cut off are
+# re-calculated into the final csv or TextGrid file. Note that word links
+# of the TRN entry are ignored, that is the script will segment all words
+# given in the KAN tier within the time segment defined by the TRN entry.
+# (this fuctionality is kept for backwards compatibility, because that is the
+# way maus handled TRN input before verion 2.50; if you wand to contrain the
+# maus segmentation not only to a time segment but also to a certain span of
+# words in the input BPF, use the options STARTWORD/ENDWORD.)
+# If more than one TRN entry is found, maus assumes that a chunk segmentation
+# is available for the input recording
+# (see http://www.bas.uni-muenchen.de/Bas/BasFormatseng.html#TRN for details).
+# The script will then call the helper maus.trn (must be installed in the
+# same location as this script) to segment each chunk separately and append the
+# results into a MAU tier of the input BPF (if OUTFORMAT is not set or set to
+# 'csv' or 'par').
+# (You may use the helper program par2TextGrid to extract the MAU tier into a
+# praat compatible TextGrid file afterwards.)
+# Chunk segmentations may contain overlapping chunks which cause problems when
+# aggregating the segmentation results of the individual chunks into one
+# TextGrid or Emu result file (since these formats do not support intervals
+# with negative times, while BPF does). Therefore if the option OUTFORMAT
+# is set to TextGrid, the script will check the input for overlaps. If there
+# are overlaps, the script will issue an error message and terminate. If
+# OUTFORMAT is set to emu or legacyEMU, the script will terminate with an error
+# (not supported yet).
+# If set to 'force' maus will search for a helper WAV2TRN to run an online
+# pre-segmentation ignoring any TRN entries in the input BPF. If the helper
+# is not found, maus will issue a warning and proceed without any pre-segmentation.
+# Default is set to 'no'. If no BPF is given on the command line this option is ignored.
+
+# Option RULESET
+# Via this option the default statistical rule set 'rml-0.95.rul' for which maus is
+# looking in PARAM can be overwritten. If the filename starts with
+# an '/' maus does not look for that file in PARAM but rather loads 
+# it directly (absolute path!). Otherwise maus will try to locate 
+# the file in the given PARAM dir.
+# Please note that the file name extension must be either of '.rul' 
+# (denoting a statistical rule set) or '.nrul' (denoting a non-statistical
+# rule set. Other extensions are not accepted.
+# Please keep in mind that the phonetic symbols used in the rule set you 
+# use must in any case match the inventar of symbols defined in 
+# PARAM/GRAPHINVENTAR. For details on how
+# to formulate new rule sets, see the docu file USAGE.
+
+# WebService: the option RULESET is not supported in the webservice. If 
+# you require to use the webservice with customized rule set, please contact 
+# the webservice administrator.
+
+# Option PRINTINV
+# If this option is set to 'yes', maus will not process any given input
+# but merely print the set of allowed SAM-PA input symbols as a simple
+# TXT list to the output file OUT or to SAMPA.tab if OUT is not given. 
+# This is useful, if you are not sure, which
+# symbols are allowed in the selected language (see options PARAM or LANGUAGE).
+
+# Exit codes
+
+# 0 : everything seems ok
+# 1 : serious error
+# 2 : probably just a signal file with the wrong coding
+# 3 : printing allowed SAM-PA set to output file
+# 4 : main arguments missing, printing help message to stdout
+
+ENDE
+  exit 4
+endif  
+
+if ( $v == 1 ) set TRACE = 1
+if ( $v == 2 ) set TRACE = 3
+if ( $v == 3 ) set TRACE = 7
+
+if ( $v > 0 ) echo "Starting maus on `date`"
+set PID = "$$_"
+
+# check parameter set
+if ( $allowresamp != "true" ) then 
+  echo "WARNING: $0 does not allow option allowresamp - this option is always set to 'true'" 
+endif  
+if ( $PARAM != "" ) then 
+  echo "WARNING: $0 does not allow option PARAM - $PARAM ignored" 
+endif  
+if ( $MMF != "" ) then 
+  echo "WARNING: $0 does not allow option MMF - $MMF ignored" 
+endif  
+# output list of allowed input SAM-PA symbols
+if ( $PRINTINV == 'true' ) then 
+  if ( $OUT == "" ) set OUT = SAMPA.tab
+  if ( $v > 0 ) echo "Printing list of allowed SAM-PA symbols to $OUT"
+  touch $OUT
+  if ( $status != 0 ) then 
+    echo "ERROR: cannot write to output file $OUT - exiting"
+    exit 1
+  endif
+  curl -X GET -H 'content-type: application/x-www-form-urlencoded' "$SERVICE/runMAUSGetInventar?LANGUAGE=${LANGUAGE}" >> $OUT
+  exit 3
+endif
+if ( $OUTFORMAT == "par" && BPF == "" ) then
+  echo "ERROR: option OUTFORMAT=par works only with BPF input not with KANSTR input - exiting"
+  exit 1
+endif  
+if ( $OUTFORMAT == "emu" || $OUTFORMAT == "legacyEMU" ) then 
+  if ( $BPF == "" ) then
+    echo "ERROR: cannot create Emu output without BPF input - use option BPF"
+    echo "       BPF input must contain the tiers ORT and KAN"
+    exit 1
+  endif
+endif  
+if ( $OUTFORMAT == "EMU" ) then 
+  echo "ERROR: option OUTFORMAT=EMU is not supported any more; use OUTFORMAT=legacyEMU"
+  exit 1
+endif
+if ( $MODUS == "align" ) then 
+  if ( $v > 0 ) then
+    echo "Doing forced alignment to the input string"
+    echo "      helper word_var-2.0 is not called; rule set ignored."
+  endif  
+else  
+  if ( $RULESET != "" ) then 
+        echo "WARNING: option RULESET cannot be used with $0 - $RULESET ignored"
+  endif  
+endif  
+if ( ( $BPF == "" || $OUTFORMAT != "TextGrid" ) && ( $INSORTTEXTGRID == "true" || $INSKANTEXTGRID == "true" ) ) then 
+  set INSORTTEXTGRID = "false"
+  set INSKANTEXTGRID = "false"
+  echo "WARNING: options INSORTTEXTGRID and INSKANTEXTGRID have no effect"
+endif  
+if ( $OUTFORMAT == "TextGrid" && ( $STARTWORD != 0 || $ENDWORD != 999999 ) && ( $INSORTTEXTGRID == "true" || $INSKANTEXTGRID == "true" ) ) then 
+  set INSORTTEXTGRID = "false"
+  set INSKANTEXTGRID = "false"
+  echo "WARNING: options INSORTTEXTGRID and INSKANTEXTGRID disabled"
+  echo "         since we are segmenting a subsection of the BPF file (options STARTWORD and ENDWORD)"
+endif  
+if ( ( $STARTWORD != 0 || $ENDWORD != 999999 ) && ( $OUTFORMAT == "emu" || $OUTFORMAT == "legacyEMU" ) ) then 
+  echo "ERROR: options STARTWORD/ENDWORD cannot be used with Emu output (emu/legacyEMU) - exiting"
+  exit 1
+endif  
+if ( $OUT == "" ) then 
+  switch( $OUTFORMAT ) 
+  case mau:
+    set OUT = ${SIGNAL:r}.mau
+    breaksw
+  case csv:
+    set OUT = ${SIGNAL:r}.csv
+    breaksw
+  case par:
+    set OUT = $BPF
+    breaksw
+  case TextGrid:
+    set OUT = ${SIGNAL:r}.TextGrid
+    breaksw
+  case emu:
+    set OUT = ${SIGNAL:r}.EMU
+    breaksw
+  case legacyEMU:
+    set OUT = ${SIGNAL:r}.EMU
+    breaksw
+  default:
+  endsw
+else
+  if ( $OUTFORMAT == "emu" || $OUTFORMAT == "legacyEMU" ) then 
+    set OUT = ${OUT:h}/${SIGNAL:t:r}.EMU
+  endif
+endif  
+if ( $v > 0 ) echo "Writing/appending results to $OUT"
+touch $OUT
+if ( $status != 0 ) then 
+  echo "ERROR: cannot write/append to output file $OUT - exiting"
+  exit 1
+endif  
+if ( $OUTFORMAT == "emu" ) then
+  touch ${OUT:r}.hlb
+  if ( $status != 0 ) then 
+    echo "ERROR: cannot create output file ${OUT:r}.hlb - exiting"
+    exit 1
+  endif  
+  touch ${OUT:r}.phonetic
+  if ( $status != 0 ) then 
+    echo "ERROR: cannot create output file ${OUT:r}.phonetic - exiting"
+    exit 1
+  endif
+endif  
+
+# check inputs
+
+# option BPF superceeds option KANSTR
+if ( $BPF != "" ) set KANSTR = ""
+
+if ( "$KANSTR" == "" ) then 
+  # checking for file
+  if ( ! -e $BPF ) then 
+    echo "ERROR: cannot find BPF input file $BPF - exiting"
+    exit 3
+  endif  
+  if ( $OUTFORMAT == "par" ) then
+    if ( ! -w $BPF ) then 
+      echo "ERROR: option OUTFORMAT=par but cannot write to BPF input file - exiting"
+      exit 3
+    endif  
+  endif
+  # checking for KAN tier
+  grep -a '^KAN:' $BPF >& /dev/null
+  if ( $status != 0 ) then
+    grep -a '^ORT:' $BPF >& /dev/null
+    if ( $status != 0 ) then
+      echo "ERROR: partitur file $BPF contains no KAN nor ORT tier - exiting"
+      exit 3
+    endif 
+  else
+    # checking for silence models in KAN tier (which are not allowed)
+    grep -a '^KAN:.*<p:>' $BPF >& /dev/null
+    if ( $status == 0 ) then
+      echo "ERROR: partitur file $BPF contains 'silence word' in the KAN tier (tip: replace it by <nib>) - exiting"
+      exit 3
+    endif
+    grep -a '^KAN:.*#$' $BPF >& /dev/null
+    if ( $status == 0 ) then
+      echo "ERROR: partitur file $BPF contains 'silence word' in the KAN tier (tip: replace it by <nib>) - exiting"
+      exit 3
+    endif
+    grep -a '^KAN:.*&$' $BPF >& /dev/null
+    if ( $status == 0 ) then
+      echo "ERROR: partitur file $BPF contains 'silence word' in the KAN tier (tip: replace it by <nib>) - exiting"
+      exit 3
+    endif
+  endif  
+  # checking for optional TRN tier
+  if ( $USETRN == "true" && BPF == "" ) set USETRN = "false"
+  if ( $USETRN == "true" ) then 
+    grep -a '^TRN:' $BPF >& /dev/null
+    if ( $status != 0 ) then
+      echo "WARNING: partitur file $BPF contains no TRN tier although you set option USETRN"
+      echo "         will ignore option USETRN"
+      set USETRN = "false"
+    endif  
+  endif  
+  # checking for BPF input for Emu output, KAN might be created later
+  if ( $OUTFORMAT == "emu" || $OUTFORMAT == "legacyEMU" ) then
+    grep -a '^ORT:' $BPF >& /dev/null
+    if ( $status != 0 ) then 
+      echo "ERROR: input BPF does not contain ORT tier for emu output"
+      echo "       Either use another OUTFORMAT than emu|legacyEMU or correct input BPF"
+      exit 3
+    endif  
+    grep -a '^KAN:' $BPF >& /dev/null
+    if ( $status != 0 ) then 
+        echo "ERROR: input BPF does not contain KAN tier for emu output"
+        echo "       Either use another OUTFORMAT than emu|legacyEMU or correct input BPF"
+        exit 3
+    endif  
+  endif
+endif
+# if the the option KANSTR is used, create an intermediate BPF file
+if ( "$KANSTR" != "" ) then
+  if ( $v > 0 ) echo "Creating an intermediate $BPF"
+  # switch USETRN off since we cannot read from a BPF
+  set USETRN = "false"
+  # if the input canonical string is given from command line, produce a 
+  # pseudo BPF file containing only the KAN tier and proceed
+  set BPF = ${SIGNAL:r}.par
+  touch $BPF
+  if ( $status != 0 ) then 
+    echo "ERROR: cannot create intermediate BPF file $BPF - exiting"
+    exit 1
+  endif  
+  set linkcount = 0
+  printf "KAN:\t%d\t" $linkcount >> $BPF
+  foreach phon ( $KANSTR ) 
+    if ( ${phon} == "#" ) then 
+      @ linkcount ++
+      printf "\nKAN:\t%d\t" $linkcount >> $BPF
+    else  
+      printf "%s" $phon >> $BPF
+    endif  
+  end  
+  printf "\n" >> $BPF
+endif  
+
+# call the webservice
+if ( $OUTFORMAT == "emu" ) then 
+  set OUTF = "legacyEMU"
+else
+ set OUTF = $OUTFORMAT
+endif 
+if ( $v > 1 ) then 
+  set CURLOPTIONS = ""
+else
+  set CURLOPTIONS = "-s"
+endif  
+if ( $v > 0 ) echo curl $CURLOPTIONS -F SIGNAL=@${SIGNAL} -F BPF=@${BPF} -F INFORMAT=${INFORMAT} -F LANGUAGE=${LANGUAGE} -F MODUS=${MODUS} -F MINPAUSLEN=${MINPAUSLEN} -F STARTWORD=${STARTWORD} -F ENDWORD=${ENDWORD} -F OUTSYMBOL=${OUTSYMBOL} -F MAUSSHIFT=${MAUSSHIFT} -F INSPROB=${INSPROB} -F USETRN=${USETRN} -F OUTFORMAT=${OUTF} -F WEIGHT=${WEIGHT} -F INSORTTEXTGRID=${INSORTTEXTGRID} -F INSKANTEXTGRID=${INSKANTEXTGRID} -H 'content-type: multipart/form-data' -X POST "${SERVICE}/runMAUS"
+  curl $CURLOPTIONS -F SIGNAL=@${SIGNAL} -F BPF=@${BPF} -F INFORMAT=${INFORMAT} -F LANGUAGE=${LANGUAGE} -F MODUS=${MODUS} -F MINPAUSLEN=${MINPAUSLEN} -F STARTWORD=${STARTWORD} -F ENDWORD=${ENDWORD} -F OUTSYMBOL=${OUTSYMBOL} -F MAUSSHIFT=${MAUSSHIFT} -F INSPROB=${INSPROB} -F USETRN=${USETRN} -F OUTFORMAT=${OUTF} -F WEIGHT=${WEIGHT} -F INSORTTEXTGRID=${INSORTTEXTGRID} -F INSKANTEXTGRID=${INSKANTEXTGRID} -H 'content-type: multipart/form-data' -X POST "${SERVICE}/runMAUS" >! /tmp/$$_WEBOUTPUT
+set err = $status
+if ( $v > 0 ) echo "curl return code: $err"
+if ( $err != 0 ) then 
+  echo "ERROR: curl terminates with error code $err"
+  echo "       check the file /tmp/$$_WEBOUTPUT for additional information - exiting"
+  exit 4
+endif  
+
+if ( $v > 2 ) then 
+  echo "Webservice XML return:"
+  cat /tmp/$$_WEBOUTPUT
+  echo ""
+endif  
+
+set woutput = `xpath -q -e '/WebServiceResponseLink/output/text()' /tmp/$$_WEBOUTPUT`
+if ( "$woutput" != "" && $v > 0 ) then 
+  echo "Webservice Output:"
+  echo "$woutput"
+  echo ""
+endif  
+set warning = `xpath -q -e '/WebServiceResponseLink/warnings/text()' /tmp/$$_WEBOUTPUT`
+if ( $v > 2 ) echo "Webservice warning:  $warning"
+if ( "$warning" != "" ) then 
+  echo "Webservice Warning:"
+  echo "$warning"
+  echo ""
+endif  
+set wcheck = `xpath -q -e '/WebServiceResponseLink/success/text()' /tmp/$$_WEBOUTPUT`
+if ( $v > 2 ) echo "webservice success flag:  $wcheck"
+if ( $wcheck != "true" ) then 
+  echo "ERROR: web services terminates with error"
+  exit 5
+endif  
+
+# handle output
+set link = `xpath -q -e '/WebServiceResponseLink/downloadLink/text()' /tmp/$$_WEBOUTPUT`
+if ( $v > 2 ) echo "Webservice reports link:  $link"
+if ( $v > 1 ) then 
+  wget -O $OUT "$link"
+else
+  wget -q -O $OUT "$link"
+endif  
+if ( $status != 0 ) then 
+  echo "ERROR: cannot download resultfile from downloadLink - exiting"
+  echo "Tried link: $link"
+  exit 6
+endif  
+
+# EMU files carry the wrong signal file name IDs from the server instead of the local 
+# machine; we correct that here; hierarchies are not supported
+if ( $OUTF == "legacyEMU" ) then
+  grep -B 99999999 -e 'utterance utterance source' $OUT >! /tmp/$$_EMUOUTPUT
+  printf "0 %s maus \n" ${SIGNAL:t:r} >> /tmp/$$_EMUOUTPUT
+  grep -A 99999999 -e 'utterance utterance source' $OUT | tail -n +3 >> /tmp/$$_EMUOUTPUT
+  mv /tmp/$$_EMUOUTPUT $OUT
+  grep -B 99999999 -e '--- cut here ---' $OUT >! /tmp/$$_EMUOUTPUT
+  printf "signal %s \n" ${SIGNAL:t:r} >> /tmp/$$_EMUOUTPUT
+  grep -A 99999999 -e '--- cut here ---' $OUT | tail -n +3 >> /tmp/$$_EMUOUTPUT
+  mv /tmp/$$_EMUOUTPUT $OUT
+endif
+
+# split EMU file
+if ( $OUTFORMAT == "emu" ) then
+  if ( $v > 0 ) echo "Splitting EMU file into hlb and phonetic files: ${OUT:r}.hlb ${OUT:r}.phonetic"
+  grep -B 99999999 -e '--- cut here ---' $OUT | head -n -1 >! ${OUT:r}.hlb
+  grep -A 99999999 -e '--- cut here ---' $OUT | tail -n +2 >! ${OUT:r}.phonetic
+endif
+
+# cleaning up 
+rm -f /tmp/$$_WEBOUTPUT
+
+if ( $v > 0 ) echo "Finishing $0 on `date`"
+
+exit 0

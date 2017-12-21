@@ -3,6 +3,12 @@ import numpy as np
 import string
 import sys
 
+# sound velocity mm/s
+sound_velocity = 340000
+
+# thr: to detect wrong value
+thr = 100
+
 def read_wave_data(file_path):
     # open a wave file, and return a Wave_read object
     f = wave.open(file_path, "rb")
@@ -21,16 +27,20 @@ def read_wave_data(file_path):
     # transpose the data
     wave_data = wave_data.T
     # calculate the time bar
-    time = np.arange(0, nframes) * (1.0 / framerate)
-    return wave_data, time
+    # time = np.arange(0, nframes) * (1.0 / framerate)
+    # get framerate
+    fs = f.getframerate()
+    return wave_data, fs
 
-def getExtensionWav(firstWavData, firstStart, firstEnd, secondWavData, secondStart, secondEnd, samplerate=384000,
+def getExtensionWav(firstWavData, firstStart, firstEnd, secondWavData, secondStart, secondEnd, samplerate,
                extension=0):
     # get index after extension
-    start = max(0, min(firstStart, secondStart) * samplerate - extension)
+    start = max(1, min(firstStart, secondStart) * samplerate - extension)
     maxSize = min(len(firstWavData), len(secondWavData))
     end = min(maxSize, max(firstEnd, secondEnd) * samplerate + extension)
     # return data after extension
+    start = int(start)
+    end = int(end)
     return firstWavData[start: end], secondWavData[start: end]
 
 def analysisFile(path):
@@ -61,7 +71,7 @@ def analysisFile(path):
     file.close()
     return realSize, result
 
-def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=1):
+def gcc_phat(sig, refsig, fs, max_tau=None, interp=16, smaller_flag=False):
      '''
      This function computes the offset between the signal sig and the reference signal refsig
      using the Generalized Cross Correlation - Phase Transform (GCC-PHAT)method.
@@ -78,25 +88,31 @@ def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=1):
      max_shift = int(interp * n / 2)
      if max_tau:
          max_shift = np.minimum(int(interp * fs * max_tau), max_shift)
-
-     cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
-
-     # find max cross correlation index
-     shift = np.argmax(np.abs(cc)) - max_shift
-
+     if not smaller_flag:
+        cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
+        # find max cross correlation index
+        shift = np.argmax(np.abs(cc)) - max_shift
+     else:
+         max_shift = int(thr * float(interp * fs) / float(sound_velocity))
+         cc = np.concatenate((cc[-max_shift:], cc[:max_shift + 1]))
+         # find max cross correlation index
+         shift = np.argmax(np.abs(cc)) - max_shift
      tau = shift / float(interp * fs)
      return tau, cc
 
 
 # get datas calculated to correlation
-def inputCorrelation(wave1_data, phonemes1, wave2_data, phonemes2, phonemeSize, extensionWav):
+def inputCorrelation(wave1_data, phonemes1, wave2_data, phonemes2, phonemeSize, extensionWav, framerate):
     correlation = []
     for i in range(phonemeSize):
-        data1, data2 = getExtensionWav(wave1_data, phonemes1[i][0], phonemes1[i][1], wave2_data, phonemes2[i][0], phonemes2[i][1],extension=extensionWav)
-        tau, cc = gcc_phat(data1, data2)
-        if tau >= (len(data1) / 2.0):
-            tau = len(data1) - tau
-        correlation.append(tau)
+        data1, data2 = getExtensionWav(wave1_data, phonemes1[i][0], phonemes1[i][1], wave2_data, phonemes2[i][0], phonemes2[i][1],extension=extensionWav, samplerate=framerate)
+        window = np.hanning(len(data1))
+        tau, cc = gcc_phat(data1 * window, data2 * window, fs = framerate)
+        tau_distance = tau * sound_velocity
+        if (abs(tau_distance) > 100):
+            tau, cc = gcc_phat(data1 * window, data2 * window, fs=framerate, smaller_flag=True)
+            tau_distance = tau * sound_velocity
+        correlation.append(round(tau_distance, 2))
     return correlation
 
 def main():
@@ -105,14 +121,21 @@ def main():
     filenameGrid1 = sys.argv[3]
     filenameGrid2 = sys.argv[4]
     # read .wav file
-    wave1_data, time1 = read_wave_data(filename1)
-    wave2_data, time2 = read_wave_data(filename2)
+    wave1_data, fs1 = read_wave_data(filename1)
+    wave2_data, fs2 = read_wave_data(filename2)
+    if fs1 != fs2:
+        print 'Error! Not same framerate!'
     # analysis .TextGrid file
     phonemesSize1, phonemesResult1 = analysisFile(filenameGrid1)
     phonemesSize2, phonemesResult2 = analysisFile(filenameGrid2)
     if phonemesSize1 != phonemesSize2:
-        print "Error!!!"
-    correlations = inputCorrelation(wave1_data, phonemesResult1, wave2_data, phonemesResult2, phonemesSize1, 0)
+       print "Error!!!"
+    # phonemesSize1 = 1
+    # phonemesResult1 = [[0, 1.37]]
+    # phonemesResult2 = [[0, 1.37]]
+    correlations = inputCorrelation(wave1_data, phonemesResult1, wave2_data, phonemesResult2, phonemesSize1, 0, fs1)
+    correlations.insert(0, filename2)
+    correlations.insert(0, filename1)
     print correlations
 if __name__ == "__main__":
     main()
